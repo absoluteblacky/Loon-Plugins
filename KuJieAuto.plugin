@@ -1,8 +1,5 @@
-// 插件名称: 库街区自动签到
-// 功能: 自动捕获Cookie、API地址，支持多账号和失败重试
-// 作者: DeepSeek-R1
-// 版本: 2.0
-// 日期: 2024-02-16
+// 插件名称: 库街区自动签到（兼容性修复版）
+// 确保此代码保存为 UTF-8 编码的 .plugin 文件
 
 const PLUGIN_NAME = "库街区签到";
 const COOKIE_KEY = "kuro_cookies";
@@ -10,127 +7,72 @@ const API_KEY = "kuro_api";
 const MAX_RETRY = 3;
 const RETRY_DELAY = 2000;
 
-// 核心逻辑
 if (typeof $request !== "undefined") {
-  handleRequestCapture();
-} else {
-  executeSignIn();
-}
-
-// 捕获请求
-function handleRequestCapture() {
   const url = $request.url;
-  const cookie = $request.headers?.Cookie || $request.headers?.cookie;
-
-  // 捕获Cookie
+  const cookie = $request.headers?.Cookie || $request.headers?.cookie || "";
+  
   if (cookie) {
-    const accountId = extractAccountId(cookie, url);
-    updateCookieStore(accountId, cookie);
-    console.log(`✅ 账号 ${accountId} Cookie已更新`);
+    const accountId = (cookie.match(/user_id=(\d+)/) || url.match(/user_id=(\d+)/))?.[1] || Date.now();
+    const stored = $persistentStore.read(COOKIE_KEY) ? JSON.parse($persistentStore.read(COOKIE_KEY)) : {};
+    stored[accountId] = { 
+      cookie: cookie, 
+      expire: Date.now() + 86400000 // 24小时有效期
+    };
+    $persistentStore.write(JSON.stringify(stored), COOKIE_KEY);
+    console.log(`账号 ${accountId} Cookie已保存`);
   }
 
-  // 捕获API地址
   if (url.includes("sign") || url.includes("checkin")) {
     $persistentStore.write(url, API_KEY);
-    console.log(`🔗 API地址已更新: ${url}`);
+    console.log("API地址已更新: " + url);
   }
-
+  
   $done();
-}
-
-// 执行签到
-function executeSignIn() {
+} else {
   const apiURL = $persistentStore.read(API_KEY);
-  const cookies = JSON.parse($persistentStore.read(COOKIE_KEY) || "{}");
-
+  const cookies = $persistentStore.read(COOKIE_KEY) ? JSON.parse($persistentStore.read(COOKIE_KEY)) : {};
+  
   if (!apiURL || Object.keys(cookies).length === 0) {
-    notifyUser("未配置API或Cookie", "请打开库街区APP完成自动配置");
-    return;
+    $notification.post(PLUGIN_NAME, "错误", "请先打开库街区APP完成配置");
+    $done();
   }
-
-  for (const [accountId, data] of Object.entries(cookies)) {
-    if (isCookieExpired(data.expire)) {
-      notifyUser(`账号 ${accountId} Cookie已过期`, "请重新登录");
-      continue;
-    }
-    attemptSignIn(apiURL, data.cookie, accountId, MAX_RETRY);
-  }
-}
-
-// 工具函数
-function extractAccountId(cookie, url) {
-  const idFromCookie = cookie.match(/user_id=(\d+)/)?.[1];
-  const idFromURL = url.match(/user_id=(\d+)/)?.[1];
-  return idFromCookie || idFromURL || Date.now().toString();
-}
-
-function updateCookieStore(accountId, cookie) {
-  const stored = JSON.parse($persistentStore.read(COOKIE_KEY) || "{}");
-  stored[accountId] = { 
-    cookie: cookie, 
-    expire: Date.now() + 86400000, // 24小时有效期
-    updated: new Date().toISOString()
-  };
-  $persistentStore.write(JSON.stringify(stored), COOKIE_KEY);
-}
-
-function isCookieExpired(expireTime) {
-  return Date.now() > parseInt(expireTime);
-}
-
-function attemptSignIn(apiURL, cookie, accountId, retries) {
-  const request = {
-    url: apiURL,
-    headers: { 
-      "Cookie": cookie,
-      "User-Agent": "KuJie/2.1.0 (com.kurobbs.app; build:2024; iOS 17.2)"
-    }
-  };
-
-  $httpClient.post(request, (error, response, data) => {
-    if (error) {
-      handleRetry(error, apiURL, cookie, accountId, retries);
+  
+  Object.entries(cookies).forEach(([accountId, data]) => {
+    if (Date.now() > data.expire) {
+      $notification.post(PLUGIN_NAME, `账号 ${accountId} 过期`, "请重新登录");
       return;
     }
-    parseSignInResult(data, accountId);
+    
+    let retry = MAX_RETRY;
+    const sign = () => {
+      $httpClient.post({
+        url: apiURL,
+        headers: { Cookie: data.cookie, "User-Agent": "KuJie/2.1.0" }
+      }, (error, _, body) => {
+        if (error) {
+          if (retry-- > 0) {
+            setTimeout(sign, RETRY_DELAY);
+          } else {
+            $notification.post(PLUGIN_NAME, `账号 ${accountId} 失败`, error);
+          }
+          return;
+        }
+        
+        try {
+          const res = JSON.parse(body);
+          if (res.code === 200) {
+            $notification.post(PLUGIN_NAME, `账号 ${accountId} 成功`, `积分: ${res.data?.points || 0}`);
+          } else {
+            $notification.post(PLUGIN_NAME, `账号 ${accountId} 错误`, res.msg || "未知错误");
+          }
+        } catch (e) {
+          $notification.post(PLUGIN_NAME, `账号 ${accountId} 数据异常`, e.message);
+        }
+      });
+    };
+    
+    sign();
   });
-}
-
-function handleRetry(error, apiURL, cookie, accountId, retries) {
-  if (retries > 0) {
-    console.log(`⏳ 账号 ${accountId} 重试中 (剩余次数: ${retries})`);
-    setTimeout(() => attemptSignIn(apiURL, cookie, accountId, retries - 1), RETRY_DELAY);
-  } else {
-    notifyUser(`账号 ${accountId} 签到失败`, error.localizedDescription || "未知网络错误");
-  }
-}
-
-function parseSignInResult(data, accountId) {
-  try {
-    const result = JSON.parse(data);
-    if (result?.code === 200) {
-      notifyUser(`账号 ${accountId} 签到成功`, `获得积分: ${result.data?.points || "未知"}`);
-    } else {
-      notifyUser(`账号 ${accountId} 签到失败`, result?.msg || "服务器返回异常");
-    }
-  } catch (e) {
-    notifyUser(`账号 ${accountId} 数据解析失败`, e.message);
-  }
-}
-
-function notifyUser(title, message) {
-  $notification.post(PLUGIN_NAME, title, message);
-}
-
-// 管理面板
-if (typeof $argument !== "undefined") {
-  const menu = [
-    { title: "📡 手动更新配置", action: "updateConfig" },
-    { title: "🔄 立即执行签到", action: "forceSignIn" }
-  ];
-  $done({
-    title: `${PLUGIN_NAME} 控制台`,
-    content: `已存储账号: ${Object.keys(JSON.parse($persistentStore.read(COOKIE_KEY) || "{}")).length}\n当前API: ${$persistentStore.read(API_KEY) || "未配置"}`,
-    menu: JSON.stringify(menu)
-  });
+  
+  $done();
 }
