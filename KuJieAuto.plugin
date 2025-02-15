@@ -1,0 +1,92 @@
+// 库街区自动签到插件
+const appName = '库街区';
+const cookieKey = 'kujie_cookies';
+const apiKey = 'kujie_api';
+
+// 自动捕获Cookie和API
+const getCookie = typeof $request !== 'undefined' ? {
+    url: $request.url,
+    cookie: $request.headers['Cookie'] || $request.headers['cookie']
+} : null;
+
+if (getCookie) {
+    // 自动捕获API地址
+    if ($request.url.includes('sign') || $request.url.includes('checkin')) {
+        $persistentStore.write($request.url, apiKey);
+        console.log(`API地址已更新：${$request.url}`);
+    }
+    
+    // 捕获Cookie
+    const storedCookies = $persistentStore.read(cookieKey) ? JSON.parse($persistentStore.read(cookieKey)) : {};
+    const accountId = $request.headers['X-User-Id'] || Date.now(); // 使用用户ID或时间戳作为账号标识
+    
+    storedCookies[accountId] = {
+        cookie: getCookie.cookie,
+        expire: Date.now() + 86400*1000 // 假设Cookie有效期1天
+    };
+    
+    $persistentStore.write(JSON.stringify(storedCookies), cookieKey);
+    $notification.post(appName, 'Cookie已自动获取', `账号${accountId}更新成功`);
+    $done();
+}
+
+// 主功能
+function main() {
+    const apiURL = $persistentStore.read(apiKey);
+    const cookies = JSON.parse($persistentStore.read(cookieKey));
+    
+    if (!apiURL || !cookies) {
+        $notification.post(appName, '配置不完整', '请先打开APP完成自动配置');
+        return;
+    }
+
+    Object.entries(cookies).forEach(([accountId, accountData]) => {
+        if (Date.now() > accountData.expire) {
+            $notification.post(appName, 'Cookie已过期', `账号${accountId}需要重新登录`);
+            return;
+        }
+
+        const request = {
+            url: apiURL,
+            headers: {
+                'Cookie': accountData.cookie,
+                'User-Agent': 'KuJie/2.1.0 (com.kujie.app; build:2024; iOS 16.4)'
+            }
+        };
+
+        $httpClient.post(request, (error, response, data) => {
+            let result = '';
+            try {
+                result = JSON.parse(data);
+            } catch (e) {
+                console.log('解析响应失败');
+            }
+            
+            const msg = result.success ? 
+                `🎉 成功 | 积分+${result.data?.points || 0}` : 
+                `❌ 失败 | ${result.message || '未知错误'}`;
+            
+            $notification.post(`${appName} 签到`, `账号${accountId}`, msg);
+        });
+    });
+}
+
+// 配置检查
+if (typeof $argument !== 'undefined') {
+    // 快捷菜单
+    const menu = [
+        { title: "📦 更新配置", action: "updateConfig" },
+        { title: "✅ 测试签到", action: "testSign" },
+        { title: "🧹 清除缓存", action: "clearCache" }
+    ];
+    
+    const panel = {
+        title: appName + "管理面板",
+        content: `已存储账号数：${Object.keys(JSON.parse($persistentStore.read(cookieKey) || '{}')).length}\n当前API：${$persistentStore.read(apiKey) || '未配置'}`,
+        menu: JSON.stringify(menu)
+    };
+    
+    $done(panel);
+} else {
+    main();
+}
