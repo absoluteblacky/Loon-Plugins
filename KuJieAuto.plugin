@@ -1,92 +1,141 @@
-// 库街区自动签到插件
-const appName = '库街区';
-const cookieKey = 'kujie_cookies';
-const apiKey = 'kujie_api';
+// 插件名称：库街区每日签到
+// 功能描述：自动完成库街区每日签到，支持多账号、自动获取Cookie和API地址
+// 作者：YourName
+// 版本：1.1.0
+// 更新时间：2023-10-01
 
-// 自动捕获Cookie和API
-const getCookie = typeof $request !== 'undefined' ? {
-    url: $request.url,
-    cookie: $request.headers['Cookie'] || $request.headers['cookie']
-} : null;
+// 常量定义
+const pluginName = "库街区签到";
+const cookieKey = "kujie_cookies"; // 存储Cookie的键名
+const apiKey = "kujie_api"; // 存储API地址的键名
+const retryCount = 3; // 失败重试次数
+const retryDelay = 2000; // 重试延迟（毫秒）
 
-if (getCookie) {
-    // 自动捕获API地址
-    if ($request.url.includes('sign') || $request.url.includes('checkin')) {
-        $persistentStore.write($request.url, apiKey);
-        console.log(`API地址已更新：${$request.url}`);
+// 自动捕获Cookie和API地址
+if (typeof $request !== "undefined") {
+    const url = $request.url;
+    const cookie = $request.headers["Cookie"] || $request.headers["cookie"];
+
+    if (cookie) {
+        // 获取账号ID（从Cookie或URL中提取）
+        const accountId = getAccountId(cookie, url);
+
+        // 读取已存储的Cookie
+        const storedCookies = $persistentStore.read(cookieKey) ? JSON.parse($persistentStore.read(cookieKey)) : {};
+
+        // 更新Cookie
+        storedCookies[accountId] = {
+            cookie: cookie,
+            expire: Date.now() + 86400 * 1000, // Cookie有效期1天
+            lastUpdate: new Date().toLocaleString()
+        };
+
+        // 保存Cookie
+        $persistentStore.write(JSON.stringify(storedCookies), cookieKey);
+        console.log(`账号 ${accountId} 的Cookie已更新`);
     }
-    
-    // 捕获Cookie
-    const storedCookies = $persistentStore.read(cookieKey) ? JSON.parse($persistentStore.read(cookieKey)) : {};
-    const accountId = $request.headers['X-User-Id'] || Date.now(); // 使用用户ID或时间戳作为账号标识
-    
-    storedCookies[accountId] = {
-        cookie: getCookie.cookie,
-        expire: Date.now() + 86400*1000 // 假设Cookie有效期1天
-    };
-    
-    $persistentStore.write(JSON.stringify(storedCookies), cookieKey);
-    $notification.post(appName, 'Cookie已自动获取', `账号${accountId}更新成功`);
+
+    // 捕获API地址
+    if (url.includes("sign") || url.includes("checkin")) {
+        $persistentStore.write(url, apiKey);
+        console.log(`API地址已更新：${url}`);
+    }
+
     $done();
 }
 
-// 主功能
+// 主函数
 function main() {
     const apiURL = $persistentStore.read(apiKey);
-    const cookies = JSON.parse($persistentStore.read(cookieKey));
-    
-    if (!apiURL || !cookies) {
-        $notification.post(appName, '配置不完整', '请先打开APP完成自动配置');
+    const cookies = $persistentStore.read(cookieKey) ? JSON.parse($persistentStore.read(cookieKey)) : {};
+
+    if (!apiURL) {
+        $notification.post(pluginName, "未配置API地址", "请先打开库街区APP完成自动配置");
         return;
     }
 
-    Object.entries(cookies).forEach(([accountId, accountData]) => {
+    if (Object.keys(cookies).length === 0) {
+        $notification.post(pluginName, "未配置Cookie", "请先打开库街区APP完成自动配置");
+        return;
+    }
+
+    // 遍历所有账号
+    for (const [accountId, accountData] of Object.entries(cookies)) {
         if (Date.now() > accountData.expire) {
-            $notification.post(appName, 'Cookie已过期', `账号${accountId}需要重新登录`);
+            $notification.post(pluginName, `账号 ${accountId} Cookie已过期`, "请重新登录");
+            continue;
+        }
+
+        // 执行签到
+        signIn(apiURL, accountData.cookie, accountId, retryCount);
+    }
+}
+
+// 签到函数
+function signIn(apiURL, cookie, accountId, retries) {
+    const request = {
+        url: apiURL,
+        headers: {
+            "Cookie": cookie,
+            "User-Agent": "KuJie/2.1.0 (com.kujie.app; build:2024; iOS 16.4)"
+        }
+    };
+
+    $httpClient.post(request, (error, response, data) => {
+        if (error) {
+            if (retries > 0) {
+                console.log(`账号 ${accountId} 签到失败，剩余重试次数：${retries}`);
+                setTimeout(() => signIn(apiURL, cookie, accountId, retries - 1), retryDelay);
+            } else {
+                $notification.post(pluginName, `账号 ${accountId} 签到失败`, error);
+            }
             return;
         }
 
-        const request = {
-            url: apiURL,
-            headers: {
-                'Cookie': accountData.cookie,
-                'User-Agent': 'KuJie/2.1.0 (com.kujie.app; build:2024; iOS 16.4)'
+        try {
+            const result = JSON.parse(data);
+            if (result.success) {
+                $notification.post(pluginName, `账号 ${accountId} 签到成功`, `获得积分：${result.data?.points || 0}`);
+            } else {
+                $notification.post(pluginName, `账号 ${accountId} 签到失败`, result.message || "未知错误");
             }
-        };
-
-        $httpClient.post(request, (error, response, data) => {
-            let result = '';
-            try {
-                result = JSON.parse(data);
-            } catch (e) {
-                console.log('解析响应失败');
-            }
-            
-            const msg = result.success ? 
-                `🎉 成功 | 积分+${result.data?.points || 0}` : 
-                `❌ 失败 | ${result.message || '未知错误'}`;
-            
-            $notification.post(`${appName} 签到`, `账号${accountId}`, msg);
-        });
+        } catch (e) {
+            $notification.post(pluginName, `账号 ${accountId} 解析响应失败`, e);
+        }
     });
 }
 
-// 配置检查
-if (typeof $argument !== 'undefined') {
+// 获取账号ID
+function getAccountId(cookie, url) {
+    // 从Cookie中提取账号ID
+    const match = cookie.match(/user_id=(\d+)/);
+    if (match) return match;
+
+    // 从URL中提取账号ID
+    const urlMatch = url.match(/user_id=(\d+)/);
+    if (urlMatch) return urlMatch;
+
+    // 如果未找到，使用时间戳作为唯一标识
+    return Date.now();
+}
+
+// 插件入口
+if (typeof $argument !== "undefined") {
     // 快捷菜单
     const menu = [
         { title: "📦 更新配置", action: "updateConfig" },
         { title: "✅ 测试签到", action: "testSign" },
         { title: "🧹 清除缓存", action: "clearCache" }
     ];
-    
+
     const panel = {
-        title: appName + "管理面板",
-        content: `已存储账号数：${Object.keys(JSON.parse($persistentStore.read(cookieKey) || '{}')).length}\n当前API：${$persistentStore.read(apiKey) || '未配置'}`,
+        title: pluginName + "管理面板",
+        content: `已存储账号数：${Object.keys(JSON.parse($persistentStore.read(cookieKey) || "{}")).length}\n当前API：${$persistentStore.read(apiKey) || "未配置"}`,
         menu: JSON.stringify(menu)
     };
-    
+
     $done(panel);
 } else {
+    // 正常执行主函数
     main();
 }
